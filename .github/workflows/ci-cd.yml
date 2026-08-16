@@ -1,0 +1,199 @@
+name: DevSecMLOps CI/CD
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE_NAME: healthcare-readmission-api
+
+jobs:
+  # -------------------------------------------------------------------------
+  lint:
+    name: Lint (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: pip install ruff==0.14.5
+      - name: Run ruff check
+        run: ruff check src/ tests/
+      - name: Run ruff format check
+        run: ruff format --check src/ tests/
+
+  # -------------------------------------------------------------------------
+  security-scan:
+    name: Security Scan (Bandit, Safety, Secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install security tools
+        run: pip install bandit[toml] safety
+      - name: Run Bandit (static application security testing)
+        run: bandit -c pyproject.toml -r src/ -f json -o bandit-report.json
+        continue-on-error: false
+      - name: Run Safety (dependency vulnerability scan)
+        env:
+          SAFETY_API_KEY: ${{ secrets.SAFETY_API_KEY }}
+        run: |
+          if [ -z "$SAFETY_API_KEY" ]; then
+            echo "::warning::SAFETY_API_KEY not set — skipping cloud vulnerability DB scan. Add it as a repo secret to enable."
+          else
+            safety scan -r requirements.txt --key "$SAFETY_API_KEY"
+          fi
+        continue-on-error: true
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  # -------------------------------------------------------------------------
+  test:
+    name: Test Suite (pytest, coverage)
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Generate synthetic data (test fixture prerequisite)
+        run: PYTHONPATH=. python src/data_generation/generate_data.py
+      - name: Run validation
+        run: PYTHONPATH=. python src/validation/validate_data.py
+      - name: Run preprocessing
+        run: PYTHONPATH=. python src/preprocessing/preprocess.py
+      - name: Run fast training smoke run (reduced search space, real artifacts for downstream tests)
+        run: |
+          PYTHONPATH=. python - <<'PY'
+          from src.training.train import ModelTrainer
+          from src.utils.config import load_config, ConfigBox
+          cfg = load_config()
+          cfg = ConfigBox(dict(cfg))
+          cfg["training"] = ConfigBox(dict(cfg["training"]))
+          cfg["training"]["models"] = ["logistic_regression", "random_forest"]
+          cfg["training"]["optuna_trials"] = 3
+          cfg["training"]["cv_folds"] = 3
+          ModelTrainer(cfg).train_all()
+          PY
+      - name: Run test suite with coverage
+        run: PYTHONPATH=. pytest tests/ -v
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: reports/coverage/
+
+  # -------------------------------------------------------------------------
+  docker-build:
+    name: Docker Build & Trivy Scan
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          load: true
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: "${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+      - name: Smoke test image (container starts + /health responds)
+        run: |
+          docker run -d --name smoke-test -p 8000:8000 ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8000/health; then echo "API healthy"; break; fi
+            echo "waiting for API..."; sleep 3
+          done
+          curl -sf http://localhost:8000/health || (docker logs smoke-test && exit 1)
+          docker stop smoke-test
+
+  # -------------------------------------------------------------------------
+  push-image:
+    name: Push Image to Registry
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
+
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [push-image]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy notice
+        run: |
+          echo "Deployment step: wire this to your target platform (e.g. terraform apply,"
+          echo "a cloud run/ECS/AKS deploy action, or an SSH/Ansible rollout)."
+          echo "See terraform/ for the reference infrastructure-as-code used by this project."
+
+  # -------------------------------------------------------------------------
+  smoke-tests:
+    name: Post-Deploy Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Health check against deployed environment
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
+        run: |
+          if [ -z "$DEPLOY_URL" ]; then
+            echo "::warning::DEPLOY_URL secret not set — skipping live smoke test."
+            exit 0
+          fi
+          curl -sf "$DEPLOY_URL/health"
+          curl -sf "$DEPLOY_URL/version"

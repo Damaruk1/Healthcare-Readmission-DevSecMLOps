@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and adjust for your environment.
+# terraform apply -var-file="terraform.tfvars"
+
+aws_region     = "us-east-1"
+project_name   = "healthcare-readmission"
+environment    = "production"
+container_port = 8000
+image_tag      = "latest"
+task_cpu       = 512
+task_memory    = 1024
+desired_count  = 1

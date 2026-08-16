@@ -1,0 +1,30 @@
+[project]
+name = "healthcare-readmission-devsecmlops"
+version = "1.0.0"
+description = "Healthcare Patient Readmission Risk Prediction — End-to-End DevSecMLOps Project (educational, synthetic data only)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["venv", ".venv", "mlruns", "data", "models", "notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "C4", "UP"]
+ignore = [
+    "E501",  # line length handled by formatter / reviewed manually where needed
+    "B008",  # FastAPI's Depends()/File() default-arg pattern is intentional
+    "UP042", # str+Enum kept intentionally for broad Pydantic/JSON-serialization compatibility
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --cov=src --cov-report=term-missing --cov-report=html:reports/coverage"
+
+[tool.bandit]
+exclude_dirs = ["venv", ".venv", "tests", "mlruns", "notebooks"]
+skips = ["B101"]  # allow assert usage in application code (used for defensive checks, not security boundaries)

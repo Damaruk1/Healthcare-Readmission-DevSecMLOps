@@ -1,0 +1,57 @@
+project:
+  name: "healthcare-readmission-devsecmlops"
+  version: "1.0.0"
+  description: "Predicts 30-day hospital readmission risk from synthetic patient data. Educational use only."
+  random_seed: 42
+
+data:
+  raw_path: "data/raw/healthcare_readmission.csv"
+  processed_train_path: "data/processed/train.csv"
+  processed_test_path: "data/processed/test.csv"
+  validated_flag_path: "data/validated/_VALIDATED"
+  n_rows: 5000
+  target_column: "readmitted_30_days"
+  id_column: "patient_id"
+  test_size: 0.2
+
+preprocessing:
+  numeric_impute_strategy: "median"
+  categorical_impute_strategy: "most_frequent"
+  outlier_iqr_multiplier: 1.5
+  scaler: "standard"
+  smote_random_state: 42
+
+training:
+  cv_folds: 5
+  optuna_trials: 20
+  scoring_metric: "roc_auc"
+  models:
+    - logistic_regression
+    - random_forest
+    - gradient_boosting
+    - xgboost
+    - lightgbm
+    - catboost
+  mlflow_experiment_name: "healthcare-readmission-risk"
+  mlflow_tracking_uri: "sqlite:///mlflow.db"
+  model_registry_name: "readmission_risk_model"
+  model_output_path: "models/best_model.joblib"
+  preprocessor_output_path: "models/preprocessor.joblib"
+  metadata_output_path: "models/model_metadata.json"
+
+monitoring:
+  drift_reference_path: "data/processed/train.csv"
+  drift_threshold: 0.3
+  performance_degradation_threshold: 0.05
+  prometheus_port: 8001
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  title: "Healthcare Patient Readmission Risk Prediction API"
+  version: "1.0.0"
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  json_format: true
